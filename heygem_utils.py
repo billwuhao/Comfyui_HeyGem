@@ -432,7 +432,6 @@ def save_tensor_as_video_lossless(image_tensor, output_path, duration, mode='nor
                  print(f"Failed even with default settings: {e_default}")
                  print("Video saving failed.")
 
-                 
 def repeat_or_pingpong_video_tensor(video_tensor, duration, mode, fps=24):
     """
     将视频张量（形状 [frames, height, width, channels]）根据指定模式和持续时间进行拼接。
@@ -446,55 +445,76 @@ def repeat_or_pingpong_video_tensor(video_tensor, duration, mode, fps=24):
     :return: 形状为 [target_frames, height, width, channels] 的 PyTorch 张量。
     """
     original_frames_count = video_tensor.shape[0]
-    # Ensure duration and fps are positive numbers to avoid errors later
-    # Convert potential tensor inputs to numbers if necessary, though the int() conversion handles basic cases
-    # Add explicit check for positive values
+
+    # Ensure duration and fps are positive numbers
+    # Convert potential tensor inputs to numbers if necessary
+    # Handle potential tensor inputs by converting to scalar numbers for checks
+    if isinstance(duration, torch.Tensor):
+         duration = duration.item()
+    if isinstance(fps, torch.Tensor):
+         fps = fps.item()
+
     if duration <= 0 or fps <= 0:
-         print("Warning: Duration and FPS must be positive. Returning empty video.")
+         print(f"Warning: Duration ({duration}) and FPS ({fps}) must be positive. Returning empty video.")
          return torch.empty((0, *video_tensor.shape[1:]), dtype=video_tensor.dtype, device=video_tensor.device)
 
+    # Calculate target frames count, ensure it's an integer
     target_frames_count = int(duration * fps)
-    original_indices = torch.arange(original_frames_count, device='cpu') # Indices on CPU
 
-    long_indices_sequence = torch.empty(0, dtype=torch.long) # Initialize empty sequence
-    one_cycle = torch.empty(0, dtype=torch.long) # Initialize one_cycle
+    # If original video is empty, and target frames > 0, we can't create a video.
+    if original_frames_count == 0:
+         if target_frames_count > 0:
+             print(f"Warning: Original video is empty (0 frames), but target duration requires {target_frames_count} frames. Returning empty video.")
+         return torch.empty((0, *video_tensor.shape[1:]), dtype=video_tensor.dtype, device=video_tensor.device)
+
+    # Original indices for a single forward pass
+    original_indices = torch.arange(original_frames_count, device='cpu', dtype=torch.long) # Indices on CPU
+
+    long_indices_sequence = torch.empty(0, dtype=torch.long, device='cpu') # Initialize empty sequence on CPU
+    one_cycle = torch.empty(0, dtype=torch.long, device='cpu') # Initialize one_cycle on CPU
 
     if mode == 'repeat':
-        if original_frames_count == 0:
-            # Cannot repeat empty video
-            long_indices_sequence = torch.empty(0, dtype=torch.long)
-        else:
-            # Repeat the original sequence until target length is met or exceeded
-            # Use ceiling division to ensure we generate *at least* target_frames_count indices
-            num_repeats = (target_frames_count + original_frames_count - 1) // original_frames_count
-            long_indices_sequence = original_indices.repeat(num_repeats)
+        # A single cycle is just the original sequence
+        one_cycle = original_indices
+        cycle_length = original_frames_count
 
-        one_cycle = original_indices # Define one_cycle for repeat mode as well for cycle_length calculation below if needed
+        # Calculate how many times the original sequence needs to be repeated
+        # Use ceiling division to ensure we generate *at least* target_frames_count indices
+        num_repeats = (target_frames_count + cycle_length - 1) // cycle_length
+        long_indices_sequence = one_cycle.repeat(num_repeats)
 
     elif mode == 'pingpong':
         forward_indices = original_indices # [0, 1, ..., N-1]
 
-        # --- FIX START ---
+        # Determine the backward sequence based on frame count
         if original_frames_count < 2:
-            # If 0 or 1 frame, pingpong backward sequence is empty
+            # If 0 or 1 frame, there's no 'backward' sequence to append.
+            # A 0-frame video is handled above. A 1-frame video [0] results in cycle [0].
             backward_indices = torch.empty(0, dtype=torch.long, device='cpu')
         elif original_frames_count == 2:
-            # If 2 frames ([0, 1]), pingpong is [0, 1, 0]. Backward sequence is [0].
-            backward_indices = torch.tensor([original_indices[0]], dtype=torch.long, device='cpu')
+            # If 2 frames ([0, 1]), pingpong goes [0, 1, 0].
+            # The forward is [0, 1]. The backward part is just [0].
+            # This is index 0 of the original sequence.
+            backward_indices = original_indices[0].unsqueeze(0) # Need to make it a tensor: [0]
         else: # original_frames_count >= 3
             # Standard pingpong backward sequence: indices from N-2 down to 1.
-            # The original slice is correct for this case.
+            # Original: [0, 1, 2, ..., N-2, N-1]
+            # Pingpong: [0, 1, 2, ..., N-2, N-1, N-2, ..., 2, 1]
+            # Backward part: [N-2, N-3, ..., 1]
+            # This requires slicing from index N-2 down to index 0 (exclusive) with step -1.
             backward_indices = original_indices[original_frames_count - 2 : 0 : -1]
-        # --- FIX END ---
 
+        # Concatenate forward and backward sequences to form one pingpong cycle
         one_cycle = torch.cat((forward_indices, backward_indices))
         cycle_length = len(one_cycle)
 
-        # Handle case where the pingpong cycle is empty (only happens if original_frames_count is 0)
+        # Handle case where the pingpong cycle is empty (only happens if original_frames_count is 0, which is handled earlier)
         if cycle_length == 0:
+            # This case should theoretically be caught by the original_frames_count == 0 check,
+            # but as a safeguard:
             if target_frames_count > 0:
-                 print("Warning: Pingpong cycle length is zero, cannot generate video for positive duration. Original video might be empty.")
-            long_indices_sequence = torch.empty(0, dtype=torch.long)
+                 print("Warning: Pingpong cycle length is zero, cannot generate video for positive duration. Original video might be empty or have only one frame with target frames > 0.")
+            long_indices_sequence = torch.empty(0, dtype=torch.long, device='cpu')
         else:
             # Repeat the cycle until target length is met or exceeded
             num_cycles = (target_frames_count + cycle_length - 1) // cycle_length
@@ -502,15 +522,23 @@ def repeat_or_pingpong_video_tensor(video_tensor, duration, mode, fps=24):
 
     # --- Common part for both modes ---
 
-    # Handle the case where we couldn't generate any long_indices_sequence (e.g., empty input video and target_frames_count > 0)
-    if long_indices_sequence.numel() == 0 and target_frames_count > 0:
-         print("Warning: Failed to generate enough indices for the target duration. Returning empty video.")
+    # If target_frames_count is 0, return an empty tensor
+    if target_frames_count == 0:
+         print("Target frames count is 0. Returning empty video.")
          return torch.empty((0, *video_tensor.shape[1:]), dtype=video_tensor.dtype, device=video_tensor.device)
 
 
     # Truncate the generated index sequence to the exact target frames count
     # This needs to happen *after* generating a sufficiently long sequence
+    # If long_indices_sequence is shorter than target_frames_count (e.g., original was empty),
+    # this slice might result in fewer frames than requested, which is expected
+    # if the source was insufficient.
     final_indices = long_indices_sequence[:target_frames_count]
+
+    # Check if we failed to generate any indices even though target > 0 (shouldn't happen with fixes, but defensive)
+    if final_indices.numel() == 0 and target_frames_count > 0:
+         print(f"Warning: Failed to generate any indices for target duration ({duration}s, {target_frames_count} frames). Original frames: {original_frames_count}. Mode: {mode}. Returning empty video.")
+         return torch.empty((0, *video_tensor.shape[1:]), dtype=video_tensor.dtype, device=video_tensor.device)
 
 
     # Use indexing
@@ -518,16 +546,19 @@ def repeat_or_pingpong_video_tensor(video_tensor, duration, mode, fps=24):
     final_indices = final_indices.to(video_tensor.device)
 
     # Use advanced indexing to select frames from the original tensor
-    # Ensure original_video is not empty before indexing
-    if original_frames_count == 0 and final_indices.numel() > 0:
-         # This case shouldn't happen if previous checks are correct, but as a safeguard
-         print("Error: Attempting to index an empty original video with non-empty indices.")
-         # Return empty video
-         return torch.empty((0, *video_tensor.shape[1:]), dtype=video_tensor.dtype, device=video_tensor.device)
+    # original_frames_count is checked earlier to be > 0 if target > 0,
+    # so video_tensor should not be empty here if final_indices is not empty.
+    try:
+        result_tensor = video_tensor[final_indices]
+    except IndexError as e:
+        print(f"Error during indexing: {e}")
+        print(f"Original video tensor shape: {video_tensor.shape}")
+        print(f"Final indices shape: {final_indices.shape}, max index: {final_indices.max().item() if final_indices.numel() > 0 else 'N/A'}, min index: {final_indices.min().item() if final_indices.numel() > 0 else 'N/A'}")
+        print(f"Original frames count: {original_frames_count}")
+        # Return empty video on unexpected index error
+        return torch.empty((0, *video_tensor.shape[1:]), dtype=video_tensor.dtype, device=video_tensor.device)
 
-    result_tensor = video_tensor[final_indices]
-
-    print(f"Original frames: {original_frames_count}, Target duration: {duration}s, FPS: {fps}, Target frames: {target_frames_count}")
+    print(f"Original frames: {original_frames_count}, Target duration: {duration}s, FPS: {fps}, Target frames: {target_frames_count}, Mode: {mode}")
     print(f"Generated video tensor shape: {result_tensor.shape}")
 
     return result_tensor
