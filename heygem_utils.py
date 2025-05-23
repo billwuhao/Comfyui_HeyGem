@@ -432,6 +432,57 @@ def save_tensor_as_video_lossless(image_tensor, output_path, duration, mode='nor
                  print(f"Failed even with default settings: {e_default}")
                  print("Video saving failed.")
 
+def repeat_or_pingpong_video_tensor(video_tensor, duration, mode, fps=24):
+    """
+    将视频张量（形状 [frames, height, width, channels]）根据指定模式和持续时间进行拼接。
+
+    :param video_tensor: 形状为 [frames, height, width, channels] 的 PyTorch 张量。
+    :param duration: 输出视频的目标持续时间（秒）。必须为正数。可以是 Python 数字或单元素 PyTorch 张量。
+    :param mode: 视频播放模式。可选值为 'pingpong' 或 'repeat'。
+                 - 'pingpong': 将视频像乒乓球一样来回播放，直到达到指定的 duration。
+                 - 'repeat': 重复播放整个视频，直到达到指定的 duration。
+    :param fps: 视频帧率。必须为正数。可以是 Python 数字或单元素 PyTorch 张量。
+    :return: 形状为 [target_frames, height, width, channels] 的 PyTorch 张量。
+    """
+    original_frames_count = video_tensor.shape[0]
+    target_frames_count = int(duration * fps)
+    original_indices = torch.arange(original_frames_count, device='cpu')
+    long_indices_sequence = torch.empty(0, dtype=torch.long) # Initialize empty sequence
+
+    if mode == 'repeat':
+        # Repeat the original sequence until target length is met or exceeded
+        num_repeats = (target_frames_count + original_frames_count - 1) // original_frames_count
+        long_indices_sequence = original_indices.repeat(num_repeats)
+
+    elif mode == 'pingpong':
+        forward_indices = original_indices
+        # Slice [start:stop:step]. stop is exclusive. Step is -1 for reverse.
+        # Start at N-2, go down to index 1.
+        backward_indices = original_indices[original_frames_count - 2 : 0 : -1]
+
+        one_cycle = torch.cat((forward_indices, backward_indices))
+        cycle_length = len(one_cycle)
+
+        # Repeat the cycle until target length is met or exceeded
+        num_cycles = (target_frames_count + cycle_length - 1) // cycle_length
+        long_indices_sequence = one_cycle.repeat(num_cycles)
+
+    # 截取到目标帧数 ---
+    # Truncate the generated index sequence to the exact target frames count
+    final_indices = long_indices_sequence[:target_frames_count]
+
+    # 使用索引构建最终张量 ---
+    # Move indices to the same device as the video_tensor for efficient indexing
+    final_indices = final_indices.to(video_tensor.device)
+
+    # Use advanced indexing to select frames from the original tensor
+    result_tensor = video_tensor[final_indices]
+
+    print(f"Original frames: {original_frames_count}, Target duration: {duration}s, FPS: {fps}, Target frames: {target_frames_count}")
+    print(f"Generated video tensor shape: {result_tensor.shape}")
+
+    return result_tensor
+
 # def save_tensor_as_image_sequence(image_tensor, output_dir, filename_prefix="frame", fps=24):
 #     """
 #     将形状为 [frames, height, width, channels] 的 PyTorch 张量保存为无损图像序列。

@@ -10,17 +10,16 @@ import json
 from tqdm import tqdm
 
 from .heygem_utils import (
+    video_to_tensor,
+    repeat_or_pingpong_video_tensor,
+    )
+
+from .xgc_heygem_utils import (
     start_heygem_service, 
     stop_heygem_service,
-    save_tensor_as_video_lossless,
-    video_to_tensor
     )
-import folder_paths
-temp_dir = folder_paths.get_temp_directory()
 
-# 创建保存文件的临时目录
-TEMP_DIR = os.path.join(temp_dir, 'heygem')
-os.makedirs(os.path.join(TEMP_DIR, 'temp'), exist_ok=True)
+TEMP_DIR = "/code/data/face2face"
 
 
 def cache_audio_tensor(
@@ -81,20 +80,25 @@ class HeyGemRun:
     def run(self, video, audio, mode, fps, stop_heygem=False):
         start_heygem_service(TEMP_DIR)
 
+        taskcode = f"{uuid.uuid4()}"
+
         audio_path = cache_audio_tensor(
             cache_dir=os.path.join(TEMP_DIR, "temp"),
             audio_tensor=audio["waveform"].squeeze(0),
             sample_rate=audio["sample_rate"]
         )
-
         duration = audio["waveform"].shape[-1] / audio["sample_rate"]
 
-        taskcode = f"{uuid.uuid4()}"
-        video_path = os.path.join(TEMP_DIR, "temp", f"{taskcode}.mkv")
-        save_tensor_as_video_lossless(video, video_path, duration, mode=mode, fps=fps)
+        if mode == "pingpong":
+            video = repeat_or_pingpong_video_tensor(video, duration, mode="pingpong", fps=fps)
+        elif mode == "repeat":
+            video = repeat_or_pingpong_video_tensor(video, duration, mode="repeat", fps=fps)
 
-        docker_video_path = os.path.join("/code/data/temp/", f"{taskcode}.mkv")
-        docker_audio_path = os.path.join("/code/data/temp/", os.path.basename(audio_path))
+        video_path = os.path.join(TEMP_DIR, "temp", f"{taskcode}.mp4")
+        video.save_to(video_path)
+        
+        docker_video_path = os.path.join("/code/data/face2face/temp/", f"{taskcode}.mp4")
+        docker_audio_path = os.path.join("/code/data/face2face/temp/", os.path.basename(audio_path))
         data = {
             "audio_url": docker_audio_path,
             "video_url": docker_video_path,
