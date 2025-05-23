@@ -63,55 +63,6 @@ def is_docker_container_running(container_name):
     except Exception:
         raise
 
-# def is_docker_service_ready(
-#     container_name: str,
-#     timeout: int = 300,
-#     polling_interval: int = 5
-# ) -> bool:
-#     """
-#     检查指定名称的 Docker 容器内的服务是否已启动并准备好工作，
-#     通过尝试连接到服务URL中的主机和端口。
-
-#     :param container_name: Docker 容器的名称。
-#     :param timeout: 等待服务准备就绪的总超时时间（秒）。
-#     :param polling_interval: 检查服务状态的间隔时间（秒）。
-#     :return: 如果容器在超时时间内运行且端口开放，则返回 True；否则返回 False。
-#     """
-#     import socket
-#     from urllib.parse import urlparse
-#     parsed_url = urlparse("http://127.0.0.1:8383")
-#     host = parsed_url.hostname
-#     port = parsed_url.port
-
-#     start_time = time.time()
-#     while time.time() - start_time < timeout:
-#         # 1. 检查容器是否正在运行
-#         if not is_docker_container_running(container_name):
-#             print(f"Container '{container_name}' is not running. Waiting {polling_interval}s...")
-#             time.sleep(polling_interval)
-#             continue
-
-#         # 2. 容器正在运行，尝试检查端口是否开放
-#         print(f"Attempting to connect to {host}:{port}...")
-#         try:
-#             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-#                 s.settimeout(polling_interval) # 设置连接超时，避免长时间阻塞
-#                 # connect_ex() 返回 0 表示成功，否则是错误码
-#                 result = s.connect_ex((host, port))
-#                 if result == 0:
-#                     print(f"Port {port} on {host} is open for '{container_name}'. Service is deemed ready.")
-#                     return True
-#                 else:
-#                     # errno.ECONNREFUSED (111 on Linux) if nothing listening
-#                     print(f"Port {port} on {host} is not open for '{container_name}' (Error code: {result}). Waiting {polling_interval}s...")
-#         except Exception as e:
-#             # 捕获其他任何socket相关的错误（如主机名解析失败等）
-#             print(f"An unexpected error occurred during port check for {host}:{port}: {e}. Waiting {polling_interval}s...")
-
-#         time.sleep(polling_interval)
-
-#     print(f"Timeout ({timeout}s) reached. Service in '{container_name}' did not become ready (port not open).")
-#     return False
 
 def docker_container_exists(container_name):
     """
@@ -433,22 +384,8 @@ def save_tensor_as_video_lossless(image_tensor, output_path, duration, mode='nor
                  print("Video saving failed.")
 
 def repeat_or_pingpong_video_tensor(video_tensor, duration, mode, fps=24):
-    """
-    将视频张量（形状 [frames, height, width, channels]）根据指定模式和持续时间进行拼接。
-
-    :param video_tensor: 形状为 [frames, height, width, channels] 的 PyTorch 张量。
-    :param duration: 输出视频的目标持续时间（秒）。必须为正数。可以是 Python 数字或单元素 PyTorch 张量。
-    :param mode: 视频播放模式。可选值为 'pingpong' 或 'repeat'。
-                 - 'pingpong': 将视频像乒乓球一样来回播放，直到达到指定的 duration。
-                 - 'repeat': 重复播放整个视频，直到达到指定的 duration。
-    :param fps: 视频帧率。必须为正数。可以是 Python 数字或单元素 PyTorch 张量。
-    :return: 形状为 [target_frames, height, width, channels] 的 PyTorch 张量。
-    """
     original_frames_count = video_tensor.shape[0]
 
-    # Ensure duration and fps are positive numbers
-    # Convert potential tensor inputs to numbers if necessary
-    # Handle potential tensor inputs by converting to scalar numbers for checks
     if isinstance(duration, torch.Tensor):
          duration = duration.item()
     if isinstance(fps, torch.Tensor):
@@ -458,167 +395,61 @@ def repeat_or_pingpong_video_tensor(video_tensor, duration, mode, fps=24):
          print(f"Warning: Duration ({duration}) and FPS ({fps}) must be positive. Returning empty video.")
          return torch.empty((0, *video_tensor.shape[1:]), dtype=video_tensor.dtype, device=video_tensor.device)
 
-    # Calculate target frames count, ensure it's an integer
     target_frames_count = int(duration * fps)
 
-    # If original video is empty, and target frames > 0, we can't create a video.
     if original_frames_count == 0:
          if target_frames_count > 0:
              print(f"Warning: Original video is empty (0 frames), but target duration requires {target_frames_count} frames. Returning empty video.")
          return torch.empty((0, *video_tensor.shape[1:]), dtype=video_tensor.dtype, device=video_tensor.device)
 
-    # Original indices for a single forward pass
-    original_indices = torch.arange(original_frames_count, device='cpu', dtype=torch.long) # Indices on CPU
-
-    long_indices_sequence = torch.empty(0, dtype=torch.long, device='cpu') # Initialize empty sequence on CPU
-    one_cycle = torch.empty(0, dtype=torch.long, device='cpu') # Initialize one_cycle on CPU
-
-    if mode == 'repeat':
-        # A single cycle is just the original sequence
-        one_cycle = original_indices
-        cycle_length = original_frames_count
-
-        # Calculate how many times the original sequence needs to be repeated
-        # Use ceiling division to ensure we generate *at least* target_frames_count indices
-        num_repeats = (target_frames_count + cycle_length - 1) // cycle_length
-        long_indices_sequence = one_cycle.repeat(num_repeats)
-
-    elif mode == 'pingpong':
-        forward_indices = original_indices # [0, 1, ..., N-1]
-
-        # Determine the backward sequence based on frame count
-        if original_frames_count < 2:
-            # If 0 or 1 frame, there's no 'backward' sequence to append.
-            # A 0-frame video is handled above. A 1-frame video [0] results in cycle [0].
-            backward_indices = torch.empty(0, dtype=torch.long, device='cpu')
-        elif original_frames_count == 2:
-            # If 2 frames ([0, 1]), pingpong goes [0, 1, 0].
-            # The forward is [0, 1]. The backward part is just [0].
-            # This is index 0 of the original sequence.
-            backward_indices = original_indices[0].unsqueeze(0) # Need to make it a tensor: [0]
-        else: # original_frames_count >= 3
-            # Standard pingpong backward sequence: indices from N-2 down to 1.
-            # Original: [0, 1, 2, ..., N-2, N-1]
-            # Pingpong: [0, 1, 2, ..., N-2, N-1, N-2, ..., 2, 1]
-            # Backward part: [N-2, N-3, ..., 1]
-            # This requires slicing from index N-2 down to index 0 (exclusive) with step -1.
-            backward_indices = original_indices[original_frames_count - 2 : 0 : -1]
-
-        # Concatenate forward and backward sequences to form one pingpong cycle
-        one_cycle = torch.cat((forward_indices, backward_indices))
-        cycle_length = len(one_cycle)
-
-        # Handle case where the pingpong cycle is empty (only happens if original_frames_count is 0, which is handled earlier)
-        if cycle_length == 0:
-            # This case should theoretically be caught by the original_frames_count == 0 check,
-            # but as a safeguard:
-            if target_frames_count > 0:
-                 print("Warning: Pingpong cycle length is zero, cannot generate video for positive duration. Original video might be empty or have only one frame with target frames > 0.")
-            long_indices_sequence = torch.empty(0, dtype=torch.long, device='cpu')
-        else:
-            # Repeat the cycle until target length is met or exceeded
-            num_cycles = (target_frames_count + cycle_length - 1) // cycle_length
-            long_indices_sequence = one_cycle.repeat(num_cycles)
-
-    # --- Common part for both modes ---
-
-    # If target_frames_count is 0, return an empty tensor
     if target_frames_count == 0:
          print("Target frames count is 0. Returning empty video.")
          return torch.empty((0, *video_tensor.shape[1:]), dtype=video_tensor.dtype, device=video_tensor.device)
 
+    original_indices = torch.arange(original_frames_count, device='cpu', dtype=torch.long)
 
-    # Truncate the generated index sequence to the exact target frames count
-    # This needs to happen *after* generating a sufficiently long sequence
-    # If long_indices_sequence is shorter than target_frames_count (e.g., original was empty),
-    # this slice might result in fewer frames than requested, which is expected
-    # if the source was insufficient.
-    final_indices = long_indices_sequence[:target_frames_count]
+    if mode == 'repeat':
+        one_cycle = original_indices
+        cycle_length = original_frames_count
 
-    # Check if we failed to generate any indices even though target > 0 (shouldn't happen with fixes, but defensive)
-    if final_indices.numel() == 0 and target_frames_count > 0:
-         print(f"Warning: Failed to generate any indices for target duration ({duration}s, {target_frames_count} frames). Original frames: {original_frames_count}. Mode: {mode}. Returning empty video.")
+    elif mode == 'pingpong':
+        forward_indices = original_indices
+        backward_indices = original_indices[-2::-1]
+
+        one_cycle = torch.cat((forward_indices, backward_indices))
+        cycle_length = len(one_cycle)
+
+        if cycle_length == 0:
+            if target_frames_count > 0:
+                 print("Warning: Pingpong cycle length is zero, cannot generate video for positive duration.")
+            return torch.empty((0, *video_tensor.shape[1:]), dtype=video_tensor.dtype, device=video_tensor.device)
+
+    else:
+         print(f"Error: Unknown mode '{mode}'. Supported modes are 'repeat' and 'pingpong'. Returning empty video.")
          return torch.empty((0, *video_tensor.shape[1:]), dtype=video_tensor.dtype, device=video_tensor.device)
 
+    num_cycles = (target_frames_count + cycle_length - 1) // cycle_length
+    long_indices_sequence = one_cycle.repeat(num_cycles)
 
-    # Use indexing
-    # Move indices to the same device as the video_tensor for efficient indexing
+    final_indices = long_indices_sequence[:target_frames_count]
+
+    if final_indices.numel() == 0 and target_frames_count > 0:
+         print(f"Warning: Failed to generate enough indices for target duration. Original frames: {original_frames_count}. Mode: {mode}. Returning empty video.")
+         return torch.empty((0, *video_tensor.shape[1:]), dtype=video_tensor.dtype, device=video_tensor.device)
+
     final_indices = final_indices.to(video_tensor.device)
 
-    # Use advanced indexing to select frames from the original tensor
-    # original_frames_count is checked earlier to be > 0 if target > 0,
-    # so video_tensor should not be empty here if final_indices is not empty.
     try:
         result_tensor = video_tensor[final_indices]
     except IndexError as e:
         print(f"Error during indexing: {e}")
-        print(f"Original video tensor shape: {video_tensor.shape}")
+        print(f"Original video tensor shape: {video_tensor.shape}, Original frames count: {original_frames_count}")
         print(f"Final indices shape: {final_indices.shape}, max index: {final_indices.max().item() if final_indices.numel() > 0 else 'N/A'}, min index: {final_indices.min().item() if final_indices.numel() > 0 else 'N/A'}")
-        print(f"Original frames count: {original_frames_count}")
-        # Return empty video on unexpected index error
         return torch.empty((0, *video_tensor.shape[1:]), dtype=video_tensor.dtype, device=video_tensor.device)
 
-    print(f"Original frames: {original_frames_count}, Target duration: {duration}s, FPS: {fps}, Target frames: {target_frames_count}, Mode: {mode}")
     print(f"Generated video tensor shape: {result_tensor.shape}")
 
     return result_tensor
-
-# def save_tensor_as_image_sequence(image_tensor, output_dir, filename_prefix="frame", fps=24):
-#     """
-#     将形状为 [frames, height, width, channels] 的 PyTorch 张量保存为无损图像序列。
-
-#     :param image_tensor: 形状为 [frames, height, width, channels] 的 PyTorch 张量，范围为 [0, 1]
-#     :param output_dir: 输出图像序列的目录
-#     :param filename_prefix: 文件名前缀
-#     :param fps: 视频帧率 (仅用于信息，不影响保存)
-#     """
-#     if not os.path.exists(output_dir):
-#         os.makedirs(output_dir)
-
-#     if image_tensor.is_cuda:
-#         tensor_np = image_tensor.cpu().numpy()
-#     else:
-#         tensor_np = image_tensor.numpy()
-
-#     # 量化到 uint8，四舍五入并裁剪
-#     tensor_np = np.clip(np.round(tensor_np * 255), 0, 255).astype(np.uint8)
-
-#     for i, frame in enumerate(tensor_np):
-#         output_path = os.path.join(output_dir, f"{filename_prefix}_{i:05d}.png")
-#         imageio.imwrite(output_path, frame)
-#     print(f"Saved frames as PNG sequence to '{output_dir}/{filename_prefix}_XXXXX.png'.")
-#     print(f"You can combine them into a video using FFmpeg: ffmpeg -i {output_dir}/{filename_prefix}_%05d.png -vf fps={fps} output.mkv")
-
-# def load_image_sequence_to_tensor(input_dir, filename_pattern="frame_%05d.png"):
-#     """
-#     从无损图像序列加载图像并转换为形状为 [frames, height, width, channels] 的 PyTorch 张量。
-
-#     :param input_dir: 包含图像序列的目录
-#     :param filename_pattern: 图像文件名模式，例如 "frame_%05d.png"
-#     :return: 形状为 [frames, height, width, channels] 的 PyTorch 张量
-#     """
-#     import glob
-#     import re
-
-#     files = sorted(glob.glob(os.path.join(input_dir, filename_pattern.replace('%05d', '*'))))
-    
-#     frames = []
-#     for file_path in files:
-#         # 确保按数字顺序读取
-#         match = re.search(r'(\d+)\.png$', os.path.basename(file_path))
-#         if match:
-#             idx = int(match.group(1))
-#             # 读取并归一化
-#             frame = imageio.imread(file_path)
-#             frame_normalized = (frame.astype(np.float32) / 255.0)
-#             frames.append((idx, frame_normalized))
-    
-#     # 确保按索引排序
-#     frames.sort(key=lambda x: x[0])
-#     frames_np = np.stack([f[1] for f in frames], axis=0)
-#     tensor = torch.tensor(frames_np, dtype=torch.float32)
-#     print(f"Loaded {len(frames)} frames from '{input_dir}' as tensor.")
-#     return tensor
 
 def video_to_tensor(video_path):
     if not os.path.exists(video_path):
