@@ -95,7 +95,10 @@ class HeyGemRun:
             video = repeat_or_pingpong_video_tensor(video, duration, mode="repeat", fps=fps)
 
         video_path = os.path.join(TEMP_DIR, "temp", f"{taskcode}.mp4")
-        video.save_to(video_path)
+
+        tensor_np = video.cpu().numpy()
+        import imageio
+        imageio.mimwrite(video_path, tensor_np, fps=fps)
         
         docker_video_path = os.path.join("/code/data/face2face/temp/", f"{taskcode}.mp4")
         docker_audio_path = os.path.join("/code/data/face2face/temp/", os.path.basename(audio_path))
