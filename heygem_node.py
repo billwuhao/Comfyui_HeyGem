@@ -95,8 +95,8 @@ class HeyGemRun:
         processed_tensor = process_tensor_by_duration(video, duration, mode, fps)
         save_tensor_as_video(processed_tensor, video_path, fps)
 
-        docker_video_path = os.path.join("/code/data/temp/", f"{taskcode}.mkv")
-        docker_audio_path = os.path.join("/code/data/temp/", os.path.basename(audio_path))
+        docker_video_path = os.path.join(TEMP_DIR, "temp", f"{taskcode}.mkv")
+        docker_audio_path = os.path.join(TEMP_DIR, "temp", os.path.basename(audio_path))
         data = {
             "audio_url": docker_audio_path,
             "video_url": docker_video_path,
@@ -149,7 +149,7 @@ class HeyGemRun:
             time.sleep(3)
             tq_bar.update(1)
 
-        res_viedo = os.path.join(TEMP_DIR, "temp", f"{taskcode}-r.mp4")
+        res_viedo = os.path.join("/code/data/temp/", f"{taskcode}-r.mp4")
 
         images_tensor = video_to_tensor(res_viedo)
         if stop_heygem:
